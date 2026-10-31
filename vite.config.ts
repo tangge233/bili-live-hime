@@ -1,12 +1,30 @@
 import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
-import path from "path";
-import tailwindcss from "@tailwindcss/vite";
+import vue from "@vitejs/plugin-vue";
+import ui from "@nuxt/ui/vite";
+import path from "node:path";
 
 const host = process.env.TAURI_DEV_HOST;
 
-export default defineConfig(async () => ({
-  plugins: [react(), tailwindcss()],
+export default defineConfig({
+  plugins: [
+    vue(),
+    ui({
+      router: false,
+      ui: {
+        colors: {
+          primary: "pink",
+          neutral: "zinc",
+        },
+      },
+      icon: {
+        clientBundle: {
+          scan: {
+            globInclude: ["**/*.{vue,ts,js,tsx,jsx,md,mdc,mdx,yml,yaml}"],
+          },
+        },
+      },
+    }),
+  ],
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "./src"),
@@ -15,7 +33,7 @@ export default defineConfig(async () => ({
   build: {
     rollupOptions: {
       output: {
-        manualChunks(id: string | string[]) {
+        manualChunks(id: string) {
           if (id.includes("node_modules")) {
             return id
               .toString()
@@ -44,4 +62,4 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
-}));
+});

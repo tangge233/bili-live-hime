@@ -14,16 +14,23 @@ edition = "2021"
 name = "bili_live_hime_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+devtools = ["tauri/devtools"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["devtools"] }
+# `devtools` is intentionally not a hard dependency: Tauri enables devtools
+# automatically on debug builds, while release builds must not ship a web
+# inspector. Opt in explicitly with `cargo build --features devtools`.
+tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-http = { version = "2", features = ["unsafe-headers"] }
-tauri-plugin-fs = "2"
+keyring = "4.2"
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 brotli = "8.0.4"
 flate2 = "1.1.9"
 tokio = { version = "1", features = ["full"] }

@@ -1,14 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
-  "windows": [
-    "main",
-    "comments"
-  ],
+  "description": "Capability for the main and comments windows",
+  "windows": ["main", "comments"],
   "permissions": [
     "core:default",
-    "opener:default",
     "core:window:default",
     "core:window:allow-start-dragging",
     "core:window:allow-minimize",
@@ -19,7 +15,17 @@
     "core:window:allow-hide",
     "core:window:allow-show",
     "core:window:allow-set-focus",
-    "http:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://github.com/Rsplwe/bili-live-hime"
+        },
+        {
+          "url": "https://github.com/Rsplwe/bili-live-hime/*"
+        }
+      ]
+    },
     {
       "identifier": "http:default",
       "allow": [
@@ -31,26 +37,9 @@
         },
         {
           "url": "https://api.live.bilibili.com/*"
-        },
-        {
-          "url": "https://*.hdslb.com/*"
         }
       ],
       "deny": []
-    },
-    "fs:default",
-    "fs:read-all",
-    "fs:write-all",
-    "fs:allow-rename",
-    "fs:allow-mkdir",
-    "fs:allow-exists",
-    "fs:allow-watch",
-    "fs:read-dirs",
-    {
-      "identifier": "fs:scope",
-      "allow": [
-        "**/*"
-      ]
     }
   ]
 }

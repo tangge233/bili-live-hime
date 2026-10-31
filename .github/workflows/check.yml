@@ -5,25 +5,36 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # actions/checkout v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       # -------------------------
-      # Node / React
+      # Node / Vue
       # -------------------------
       - name: Setup Node
-        uses: actions/setup-node@v6
+        # actions/setup-node v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: latest
+          node-version: lts/*
           cache: npm
 
       - name: Install frontend deps
-        run: npm ci
+        run: npm ci --ignore-scripts
+
+      - name: Lint frontend
+        run: npm run lint
+
+      - name: Check frontend formatting
+        run: npx prettier --check .
 
       - name: Build frontend
         run: npm run build
@@ -32,14 +43,16 @@ jobs:
       # Rust
       # -------------------------
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        # dtolnay/rust-toolchain stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: rustfmt, clippy
 
       - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
+        # Swatinem/rust-cache v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          workspaces: './src-tauri -> target'
+          workspaces: "./src-tauri -> target"
 
       # -------------------------
       # Linux Tauri deps
@@ -56,6 +69,15 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Lint Rust
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Build Tauri
         run: cargo build --manifest-path src-tauri/Cargo.toml --release

@@ -1,4 +1,4 @@
-import { useConfigStore } from "@/store/config";
+import { useConfigStore } from "@/stores/config";
 import type { AppCookie } from "@/types/config";
 import { fetch } from "@tauri-apps/plugin-http";
 import { appSign } from "@/lib/app-sign";
@@ -17,6 +17,71 @@ const COMMON_HEADERS = {
   "sec-fetch-site": "same-site",
 };
 
+const COOKIE_SPLIT_PATTERN = /,(?=\s*[!#$%&'*+\-.^_`|~0-9A-Za-z]+=)/;
+
+/**
+ * Parses one or more `Set-Cookie` header values. A naive `split(",")` breaks
+ * on the comma inside `Expires=Wed, 21 Oct ...`, so only split where the next
+ * segment starts a new `name=value` pair.
+ */
+function parseSetCookies(headers: string[]): AppCookie[] {
+  const cookies: AppCookie[] = [];
+
+  for (const header of headers) {
+    for (const segment of header.split(COOKIE_SPLIT_PATTERN)) {
+      const pair = segment.split(";", 1)[0]?.trim();
+      if (!pair) continue;
+
+      const separator = pair.indexOf("=");
+      if (separator <= 0) continue;
+
+      const name = pair.slice(0, separator).trim();
+      const value = pair.slice(separator + 1).trim();
+      if (name && value) {
+        cookies.push({ name, value });
+      }
+    }
+  }
+
+  return cookies;
+}
+
+function getSetCookieHeaders(response: Response): string[] {
+  const headers = response.headers as Headers & {
+    getSetCookie?: () => string[];
+  };
+
+  if (typeof headers.getSetCookie === "function") {
+    const values = headers.getSetCookie();
+    if (values.length > 0) return values;
+  }
+
+  const combined = response.headers.get("set-cookie");
+  return combined ? [combined] : [];
+}
+
+function applyCookies(cookies: AppCookie[]) {
+  if (cookies.length === 0) return;
+
+  // Only session-changing responses matter here. Merging every tracking
+  // cookie would both bloat the secret store and risk overwriting unrelated
+  // values.
+  const hasSessionCookie = cookies.some(
+    (cookie) => cookie.name === "SESSDATA" || cookie.name === "bili_jct",
+  );
+  if (!hasSessionCookie) return;
+
+  const current = useConfigStore().config.cookies;
+  const merged = new Map(current.map((cookie) => [cookie.name, cookie.value]));
+  for (const cookie of cookies) {
+    merged.set(cookie.name, cookie.value);
+  }
+
+  useConfigStore().setCookies(
+    [...merged].map(([name, value]) => ({ name, value })),
+  );
+}
+
 export async function request<T>(
   base_url: string,
   endpoint: string,
@@ -26,10 +91,9 @@ export async function request<T>(
   requireSign: boolean = false,
   raw: boolean = false,
 ): Promise<T> {
-  const state = useConfigStore.getState();
+  const state = useConfigStore();
   const url = `${base_url}${endpoint}`;
   const method = options.method?.toUpperCase() || "GET";
-  console.log(`Url (${method}): ${url}`);
 
   const headers: HeadersInit = {
     ...COMMON_HEADERS,
@@ -52,37 +116,65 @@ export async function request<T>(
       const urlSP = new URLSearchParams(options.data);
       fetchOptions.body = urlSP.toString();
     }
-    console.log(fetchOptions.body);
   }
+
   const response = await fetch(url, fetchOptions);
-  const cookieHeader = response.headers.get("set-cookie");
-  if (cookieHeader) {
-    const cookies: AppCookie[] = [];
-    cookieHeader.split(",").forEach((cookie: string) => {
-      const [name, value] = cookie.split(";")[0].split("=");
-      if (name && value) {
-        cookies.push({ name: name.trim(), value: value.trim() } as AppCookie);
-      }
-    });
+  const contentType = response.headers.get("content-type") ?? "";
+  const body = await response.text();
 
-    const sessdata = cookies.find((c) => c.name === "SESSDATA");
-    const biliJct = cookies.find((c) => c.name === "bili_jct");
-
-    if (sessdata && biliJct) {
-      state.setCookies(cookies);
-    }
-  }
-
-  const data = await response.json();
-  console.log(data);
-
-  if (raw) {
-    return data;
-  }
-  if (data.code !== 0 || data.data === null) {
+  if (!contentType.toLowerCase().includes("json")) {
     throw new Error(
-      `API Request Error: ${data.message || "Unknown Error"} (${data.code})`,
+      `API returned an unexpected response (HTTP ${response.status})`,
     );
   }
-  return data.data;
+
+  let data: unknown;
+  try {
+    data = body ? JSON.parse(body) : null;
+  } catch {
+    throw new Error(`API returned malformed JSON (HTTP ${response.status})`);
+  }
+
+  if (!response.ok) {
+    const message =
+      typeof data === "object" &&
+      data !== null &&
+      "message" in data &&
+      typeof data.message === "string"
+        ? data.message
+        : response.statusText || "Unknown Error";
+    throw new Error(`HTTP ${response.status}: ${message}`);
+  }
+
+  if (!raw) {
+    if (
+      typeof data !== "object" ||
+      data === null ||
+      Array.isArray(data) ||
+      !("code" in data)
+    ) {
+      throw new Error("API returned an unexpected response body");
+    }
+
+    const result = data as { code: unknown; message?: unknown; data?: unknown };
+    if (
+      result.code !== 0 ||
+      result.data === null ||
+      result.data === undefined
+    ) {
+      const message =
+        typeof result.message === "string" ? result.message : "Unknown Error";
+      throw new Error(`API Request Error: ${message} (${String(result.code)})`);
+    }
+
+    // Only trust cookies from a fully successful API response. A failed
+    // login/poll must not be able to replace the stored session.
+    applyCookies(parseSetCookies(getSetCookieHeaders(response)));
+    return result.data as T;
+  }
+
+  // Raw responses have no shared envelope, so HTTP success is the only
+  // success signal available.
+  applyCookies(parseSetCookies(getSetCookieHeaders(response)));
+  return data as T;
 }

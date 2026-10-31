@@ -1,15 +1,9 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": [
-    "react",
-    "typescript",
-    "oxc"
-  ],
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  },
+  "plugins": ["typescript", "unicorn", "oxc", "vue"],
   "env": {
     "builtin": true,
-  }
+    "browser": true
+  },
+  "ignorePatterns": ["dist/**", "src-tauri/target/**", "src-tauri/gen/**"]
 }

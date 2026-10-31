@@ -1,8 +1,12 @@
 mod commands;
 mod connection;
+mod storage;
 mod utils;
 
-use crate::commands::{comment_connect, comment_disconnect, comment_is_connected};
+use crate::commands::{
+    clear_app_secrets, comment_connect, comment_disconnect, comment_is_connected, load_app_config,
+    load_app_secrets, save_app_config, save_app_secrets,
+};
 use std::sync::Arc;
 use tauri::{Manager, PhysicalPosition, RunEvent, WindowEvent};
 use tokio::sync::Mutex;
@@ -17,10 +21,13 @@ pub type AppState = Arc<Mutex<ConnectionState>>;
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(AppState::new(Mutex::new(ConnectionState { handle: None })))
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // Create the config directory in Rust so the WebView does not need
+            // broad filesystem permissions.
+            storage::ensure_config_dir(app.handle()).map_err(std::io::Error::other)?;
+
             if let Some(window) = app.get_webview_window("comments") {
                 if let Some(monitor) = window.primary_monitor()? {
                     let monitor_position = monitor.position();
@@ -39,7 +46,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             comment_connect,
             comment_disconnect,
-            comment_is_connected
+            comment_is_connected,
+            load_app_config,
+            save_app_config,
+            load_app_secrets,
+            save_app_secrets,
+            clear_app_secrets
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

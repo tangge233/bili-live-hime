@@ -14,11 +14,12 @@
       {
         "label": "main",
         "title": "哔哩哔哩直播姬（仮）",
-        "width": 900,
-        "height": 600,
-        "minWidth": 900,
-        "minHeight": 600,
-        "decorations": false
+        "width": 400,
+        "height": 760,
+        "minWidth": 360,
+        "minHeight": 560,
+        "decorations": false,
+        "maximizable": false
       },
       {
         "label": "comments",
@@ -38,29 +39,16 @@
       }
     ],
     "security": {
-      "csp": null
-    }
-  },
-  "plugins": {
-    "fs": {
-      "requireLiteralLeadingDot": false
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost https://*.hdslb.com data: blob:; connect-src 'self' ipc: http://ipc.localhost",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost https://*.hdslb.com data: blob:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420"
     }
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "deb",
-      "rpm",
-      "appimage",
-      "nsis",
-      "app",
-      "dmg"
-    ],
+    "targets": ["deb", "rpm", "appimage", "nsis", "app", "dmg"],
     "windows": {
       "nsis": {
-        "languages": [
-          "SimpChinese"
-        ]
+        "languages": ["SimpChinese"]
       }
     },
     "icon": [

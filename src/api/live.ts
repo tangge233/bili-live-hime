@@ -1,7 +1,7 @@
 import { request } from "@/lib/api";
 import type { ParentArea } from "@/types/config";
 import { encWbi } from "@/lib/wbi";
-import { useConfigStore } from "@/store/config";
+import { useConfigStore } from "@/stores/config";
 import { appSign } from "@/lib/app-sign";
 
 const BASE_URL = "https://api.live.bilibili.com";
@@ -92,26 +92,26 @@ interface RoomSilent {
   minute: number;
 }
 
+export interface ContributionRankItem {
+  uid: number;
+  name: string;
+  face: string;
+  rank: number;
+  score: number;
+  wealth_level: number;
+  medal_info: {
+    medal_name: string;
+    level: number;
+    guard_level: number;
+    is_light: number;
+    medal_color_start: number;
+    medal_color_end: number;
+    medal_color_border: number;
+  };
+}
+
 interface ContributionRank {
-  item:
-    | {
-        uid: number;
-        name: string;
-        face: string;
-        rank: number;
-        score: number;
-        wealth_level: number;
-        medal_info: {
-          medal_name: string;
-          level: number;
-          guard_level: number;
-          is_light: number;
-          medal_color_start: number;
-          medal_color_end: number;
-          medal_color_border: number;
-        };
-      }[]
-    | null;
+  item: ContributionRankItem[] | null;
 }
 
 export async function getRoomId(uid: number): Promise<RoomId> {
@@ -135,10 +135,9 @@ export async function getAreaList(): Promise<ParentArea[]> {
 }
 
 export async function getRoomToken(roomId: number): Promise<RoomTokenInfo> {
-  const config = useConfigStore.getState().config;
+  const config = useConfigStore().config;
   //type=0&web_location=444.8
   const query = encWbi({ id: roomId, type: 0 }, config.img_url, config.sub_url);
-  console.log(query);
   return request<RoomTokenInfo>(
     BASE_URL,
     `/xlive/web-room/v1/index/getDanmuInfo?${query}`,
@@ -168,7 +167,7 @@ export async function getLiveVersion(): Promise<LiveVersion> {
 }
 
 export async function updateRoomTitle(title: string): Promise<[]> {
-  const state = useConfigStore.getState();
+  const state = useConfigStore();
   return request<[]>(BASE_URL, `/room/v1/Room/update`, {
     method: "POST",
     headers: {
@@ -185,7 +184,7 @@ export async function updateRoomTitle(title: string): Promise<[]> {
 }
 
 export async function updateRoomArea(areaId: string): Promise<[]> {
-  const state = useConfigStore.getState();
+  const state = useConfigStore();
   return request<[]>(BASE_URL, `/room/v1/Room/update`, {
     method: "POST",
     headers: {
@@ -205,7 +204,7 @@ export async function startLive(
   version: string,
   build: string,
 ): Promise<StartLive> {
-  const state = useConfigStore.getState();
+  const state = useConfigStore();
   return request<StartLive>(
     BASE_URL,
     `/room/v1/Room/startLive`,
@@ -232,7 +231,7 @@ export async function startLive(
 }
 
 export async function stopLive(): Promise<[]> {
-  const state = useConfigStore.getState();
+  const state = useConfigStore();
   return request<[]>(BASE_URL, `/room/v1/Room/stopLive`, {
     method: "POST",
     headers: {
@@ -248,13 +247,12 @@ export async function stopLive(): Promise<[]> {
 }
 
 export async function sendComment(comment: string): Promise<[]> {
-  const state = useConfigStore.getState();
+  const state = useConfigStore();
   const query = encWbi(
     { web_location: 444.8 },
     state.config.img_url,
     state.config.sub_url,
   );
-  console.log(query);
   return request<[]>(BASE_URL, `/msg/send?${query}`, {
     method: "POST",
     headers: {
@@ -285,7 +283,7 @@ export async function getRoomAdmins(page: number): Promise<RoomAdmins> {
 }
 
 export async function addRoomAdmin(id: string): Promise<object> {
-  const csrf = useConfigStore.getState().getCookie("bili_jct") || "";
+  const csrf = useConfigStore().getCookie("bili_jct") || "";
   return request<object>(BASE_URL, `/xlive/web-ucenter/v1/roomAdmin/appoint`, {
     method: "POST",
     headers: {
@@ -302,7 +300,7 @@ export async function addRoomAdmin(id: string): Promise<object> {
 }
 
 export async function deleteRoomAdmin(id: string): Promise<object> {
-  const csrf = useConfigStore.getState().getCookie("bili_jct") || "";
+  const csrf = useConfigStore().getCookie("bili_jct") || "";
   return request<object>(BASE_URL, `/xlive/app-ucenter/v1/roomAdmin/dismiss`, {
     method: "POST",
     headers: {
@@ -318,8 +316,8 @@ export async function deleteRoomAdmin(id: string): Promise<object> {
 }
 
 export async function getSilentUserList(page: number): Promise<SilentUser> {
-  const roomId = useConfigStore.getState().config.roomId;
-  const csrf = useConfigStore.getState().getCookie("bili_jct") || "";
+  const roomId = useConfigStore().config.roomId;
+  const csrf = useConfigStore().getCookie("bili_jct") || "";
   return request<SilentUser>(
     BASE_URL,
     `/xlive/web-ucenter/v1/banned/GetSilentUserList`,
@@ -340,9 +338,10 @@ export async function getSilentUserList(page: number): Promise<SilentUser> {
 }
 
 export async function searchUsers(search: string): Promise<SearchUser> {
+  const query = new URLSearchParams({ search });
   return request<SearchUser>(
     BASE_URL,
-    `/banned_service/v2/Silent/search_user?search=${search}`,
+    `/banned_service/v2/Silent/search_user?${query.toString()}`,
     {
       headers: {
         Origin: BASE_URL,
@@ -352,8 +351,8 @@ export async function searchUsers(search: string): Promise<SearchUser> {
 }
 
 export async function addSilentUser(id: string, time: string): Promise<object> {
-  const roomId = useConfigStore.getState().config.roomId;
-  const csrf = useConfigStore.getState().getCookie("bili_jct") || "";
+  const roomId = useConfigStore().config.roomId;
+  const csrf = useConfigStore().getCookie("bili_jct") || "";
   return request<object>(
     BASE_URL,
     `/xlive/web-ucenter/v1/banned/AddSilentUser`,
@@ -376,8 +375,8 @@ export async function addSilentUser(id: string, time: string): Promise<object> {
 }
 
 export async function deleteSilentUser(id: string): Promise<object> {
-  const roomId = useConfigStore.getState().config.roomId;
-  const csrf = useConfigStore.getState().getCookie("bili_jct") || "";
+  const roomId = useConfigStore().config.roomId;
+  const csrf = useConfigStore().getCookie("bili_jct") || "";
   return request<object>(
     BASE_URL,
     `/xlive/web-ucenter/v1/banned/DelSilentUser`,
@@ -399,7 +398,7 @@ export async function deleteSilentUser(id: string): Promise<object> {
 }
 
 export async function getRoomSilent(): Promise<RoomSilent> {
-  const roomId = useConfigStore.getState().config.roomId;
+  const roomId = useConfigStore().config.roomId;
   return request<RoomSilent>(
     BASE_URL,
     `/xlive/web-room/v1/banned/GetRoomSilent?room_id=${roomId}`,
@@ -416,8 +415,8 @@ export async function setRoomSilent(
   level: number = 1,
   minute: number = 0,
 ): Promise<object> {
-  const roomId = useConfigStore.getState().config.roomId;
-  const csrf = useConfigStore.getState().getCookie("bili_jct") || "";
+  const roomId = useConfigStore().config.roomId;
+  const csrf = useConfigStore().getCookie("bili_jct") || "";
   return request<object>(BASE_URL, `/xlive/web-room/v1/banned/RoomSilent`, {
     method: "POST",
     headers: {
@@ -443,8 +442,8 @@ interface KeywordList {
 }
 
 export async function getBlockedWords(): Promise<KeywordList> {
-  const roomId = useConfigStore.getState().config.roomId;
-  const csrf = useConfigStore.getState().getCookie("bili_jct") || "";
+  const roomId = useConfigStore().config.roomId;
+  const csrf = useConfigStore().getCookie("bili_jct") || "";
   return request<KeywordList>(
     BASE_URL,
     `/xlive/web-ucenter/v1/banned/GetShieldKeywordList`,
@@ -464,8 +463,8 @@ export async function getBlockedWords(): Promise<KeywordList> {
 }
 
 export async function addBlockedWords(keyword: string): Promise<object> {
-  const roomId = useConfigStore.getState().config.roomId;
-  const csrf = useConfigStore.getState().getCookie("bili_jct") || "";
+  const roomId = useConfigStore().config.roomId;
+  const csrf = useConfigStore().getCookie("bili_jct") || "";
   return request<object>(
     BASE_URL,
     `/xlive/web-ucenter/v1/banned/AddShieldKeyword`,
@@ -486,8 +485,8 @@ export async function addBlockedWords(keyword: string): Promise<object> {
 }
 
 export async function deleteBlockedWords(keyword: string): Promise<object> {
-  const roomId = useConfigStore.getState().config.roomId;
-  const csrf = useConfigStore.getState().getCookie("bili_jct") || "";
+  const roomId = useConfigStore().config.roomId;
+  const csrf = useConfigStore().getCookie("bili_jct") || "";
   return request<object>(
     BASE_URL,
     `/xlive/web-ucenter/v1/banned/DelShieldKeyword`,
@@ -508,7 +507,7 @@ export async function deleteBlockedWords(keyword: string): Promise<object> {
 }
 
 export async function getContributionRank(): Promise<ContributionRank> {
-  const state = useConfigStore.getState();
+  const state = useConfigStore();
   const query = encWbi(
     {
       ruid: state.config.uid,
@@ -523,7 +522,6 @@ export async function getContributionRank(): Promise<ContributionRank> {
     state.config.img_url,
     state.config.sub_url,
   );
-  console.log(query);
   return request<ContributionRank>(
     BASE_URL,
     `/xlive/general-interface/v1/rank/queryContributionRank?${query}`,

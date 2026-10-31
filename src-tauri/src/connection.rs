@@ -4,10 +4,19 @@ use bytes::{Buf, BufMut, BytesMut};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
-use tokio::{net::TcpStream, time::interval};
-use tokio_util::codec::{Decoder, Encoder, Framed};
+use tokio::time::{interval, timeout, MissedTickBehavior};
+use tokio_tungstenite::{
+    connect_async_with_config,
+    tungstenite::{protocol::WebSocketConfig, Message as WsMessage},
+};
+use tokio_util::codec::{Decoder, Encoder};
 
 use crate::utils::{brotli_decode, zlib_decode};
+
+const DANMAKU_WSS_URL: &str = "wss://broadcastlv.chat.bilibili.com/sub";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 12 * 1024 * 1024;
+const MAX_SUB_PACKETS_PER_FRAME: usize = 4096;
 
 #[derive(Debug, Clone)]
 struct ProtocolHeader {
@@ -95,6 +104,17 @@ impl Decoder for ProtocolCodec {
             ));
         }
 
+        // A hostile peer must not be able to make the subsequent
+        // `total_size - header_size` subtraction underflow or make `advance`
+        // panic. `header_size` is always 16 in practice; anything outside
+        // [16, total_size] is a malformed frame.
+        if header_size < 16 || total_size < header_size as u32 {
+            return Err(Self::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid header size",
+            ));
+        }
+
         if src.len() < total_size as usize {
             src.reserve(total_size as usize - src.len());
             return Ok(None);
@@ -157,6 +177,70 @@ struct AuthPayload {
     key: String,
 }
 
+fn parse_header(view: &[u8]) -> Option<ProtocolHeader> {
+    if view.len() < 16 {
+        return None;
+    }
+
+    Some(ProtocolHeader {
+        total_size: u32::from_be_bytes(view[0..4].try_into().ok()?),
+        header_size: u16::from_be_bytes(view[4..6].try_into().ok()?),
+        protocol_version: u16::from_be_bytes(view[6..8].try_into().ok()?),
+        opcode: u32::from_be_bytes(view[8..12].try_into().ok()?),
+        sequence: u32::from_be_bytes(view[12..16].try_into().ok()?),
+    })
+}
+
+/// Splits a decompressed payload into sub-packet bodies.
+///
+/// Every length is attacker-controlled, so a sub-packet that declares zero
+/// bytes must be rejected instead of advancing `offset` by zero forever.
+fn split_sub_packets(buffer: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
+    let mut packets = Vec::new();
+    let mut offset = 0usize;
+
+    while offset < buffer.len() {
+        if packets.len() >= MAX_SUB_PACKETS_PER_FRAME {
+            return Err("too many sub packets");
+        }
+
+        let sub_buffer = &buffer[offset..];
+        let header = parse_header(sub_buffer).ok_or("truncated sub packet header")?;
+
+        if header.total_size == 0 {
+            return Err("zero-sized sub packet");
+        }
+        if header.header_size < 16 {
+            return Err("invalid sub packet header size");
+        }
+
+        let total_size = header.total_size as usize;
+        let header_size = header.header_size as usize;
+        if total_size < header_size {
+            return Err("sub packet total size is smaller than its header");
+        }
+
+        let body_end = offset
+            .checked_add(total_size)
+            .ok_or("sub packet size overflow")?;
+        if body_end > buffer.len() {
+            return Err("truncated sub packet body");
+        }
+
+        packets.push(&buffer[offset + header_size..body_end]);
+        offset = body_end;
+    }
+
+    Ok(packets)
+}
+
+fn encode_message(message: Message) -> Result<Vec<u8>, std::io::Error> {
+    let mut codec = ProtocolCodec;
+    let mut buffer = BytesMut::new();
+    codec.encode(message, &mut buffer)?;
+    Ok(buffer.to_vec())
+}
+
 pub struct SocketClient {
     app_handle: AppHandle,
 }
@@ -166,20 +250,6 @@ impl SocketClient {
         SocketClient { app_handle: value }
     }
 
-    fn parse_header(&self, view: &[u8]) -> Option<ProtocolHeader> {
-        if view.len() < 16 {
-            return None;
-        }
-
-        Some(ProtocolHeader {
-            total_size: u32::from_be_bytes(view[0..4].try_into().ok()?),
-            header_size: u16::from_be_bytes(view[4..6].try_into().ok()?),
-            protocol_version: u16::from_be_bytes(view[6..8].try_into().ok()?),
-            opcode: u32::from_be_bytes(view[8..12].try_into().ok()?),
-            sequence: u32::from_be_bytes(view[12..16].try_into().ok()?),
-        })
-    }
-
     fn parse_message(&self, payload: &[u8]) {
         match String::from_utf8(payload.to_vec()) {
             Ok(result) => {
@@ -187,38 +257,18 @@ impl SocketClient {
                     .app_handle
                     .emit("message-received", MessageEvent { payload: result });
             }
-            Err(_) => {
-                eprintln!("Invalid message payload");
-                return;
-            }
-        };
+            Err(_) => eprintln!("Invalid message payload"),
+        }
     }
 
     fn depack_sub_packet(&self, buffer: &[u8]) {
-        let mut offset: usize = 0;
-        while offset < buffer.len() {
-            let sub_buffer = &buffer[offset..];
-            let header = match self.parse_header(sub_buffer) {
-                Some(v) => v,
-                None => break,
-            };
-            let total_size = header.total_size as usize;
-            let header_size = header.header_size as usize;
-
-            if offset + total_size > buffer.len() || header_size > total_size {
-                break;
+        match split_sub_packets(buffer) {
+            Ok(packets) => {
+                for payload in packets {
+                    self.parse_message(payload);
+                }
             }
-
-            let body_start = offset + header_size;
-            let body_end = offset + total_size;
-
-            if body_end > buffer.len() || body_start > body_end {
-                eprintln!("Invalid sub packet size");
-                break;
-            }
-            let payload = &buffer[body_start..body_end];
-            self.parse_message(payload);
-            offset += total_size;
+            Err(error) => self.emit_error(format!("Invalid sub packets: {error}")),
         }
     }
 
@@ -248,32 +298,41 @@ impl SocketClient {
 
     pub async fn connection(
         &self,
-        host: String,
-        port: u16,
         uid: u64,
         room: u32,
         auth_token: String,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let addr = format!("{}:{}", host, port);
-        let stream = match TcpStream::connect(&addr).await {
-            Ok(s) => s,
-            Err(e) => {
+        // Bilibili exposes the danmaku stream over TLS. Connecting to the
+        // plaintext port lets anyone on the network read the session token,
+        // so always use the fixed WSS endpoint instead of accepting a
+        // caller-supplied host/port.
+        let websocket_config = WebSocketConfig::default()
+            .max_message_size(Some(MAX_WEBSOCKET_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_WEBSOCKET_MESSAGE_BYTES));
+        let connection = timeout(
+            CONNECT_TIMEOUT,
+            connect_async_with_config(DANMAKU_WSS_URL, Some(websocket_config), true),
+        )
+        .await;
+
+        let mut websocket = match connection {
+            Ok(Ok((websocket, _))) => websocket,
+            Ok(Err(e)) => {
                 self.emit_error(format!("Connection failed: {}", e));
                 return Err(e.into());
             }
+            Err(_) => {
+                self.emit_error("Connection timed out");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "connection timed out",
+                )
+                .into());
+            }
         };
 
-        let _ = self.app_handle.emit(
-            "connection-success",
-            ConnectionEvent {
-                status: "connected".to_string(),
-            },
-        );
-
-        let mut framed = Framed::new(stream, ProtocolCodec);
-
         let auth_obj = AuthPayload {
-            uid: uid,
+            uid,
             roomid: room,
             protover: 3,
             platform: "web".to_owned(),
@@ -282,39 +341,87 @@ impl SocketClient {
         };
         let auth_json = serde_json::to_string(&auth_obj)?;
         let verification = Message::verification(1, auth_json.into_bytes());
-        if let Err(e) = framed.send(verification).await {
+        if let Err(e) = websocket
+            .send(WsMessage::Binary(encode_message(verification)?.into()))
+            .await
+        {
             self.emit_error(format!("Failed to send auth: {}", e));
             return Err(e.into());
         }
 
+        // Only report success after the authentication packet was sent. If an
+        // earlier step fails, the frontend must not be left thinking that the
+        // connection is healthy.
+        let _ = self.app_handle.emit(
+            "connection-success",
+            ConnectionEvent {
+                status: "connected".to_string(),
+            },
+        );
+
         let mut sequence = 2u32;
         let mut heartbeat_interval = interval(Duration::from_secs(30));
+        heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         heartbeat_interval.tick().await;
+
+        let mut codec = ProtocolCodec;
+        let mut incoming = BytesMut::new();
 
         loop {
             tokio::select! {
-                Some(result) = framed.next() => {
-                    match result {
-                        Ok(msg) => {
-                            self.handle_incoming_message(msg);
+                message = websocket.next() => {
+                    let Some(message) = message else {
+                        break;
+                    };
+
+                    match message {
+                        Ok(WsMessage::Binary(data)) => {
+                            incoming.extend_from_slice(&data);
                         }
+                        Ok(WsMessage::Text(text)) => {
+                            incoming.extend_from_slice(text.as_bytes());
+                        }
+                        Ok(WsMessage::Close(_)) => break,
+                        Ok(_) => continue,
                         Err(e) => {
                             self.emit_error(format!("Receive error: {}", e));
                             break;
                         }
                     }
+
+                    loop {
+                        match codec.decode(&mut incoming) {
+                            Ok(Some(msg)) => self.handle_incoming_message(msg),
+                            Ok(None) => break,
+                            Err(e) => {
+                                self.emit_error(format!("Protocol error: {}", e));
+                                incoming.clear();
+                                break;
+                            }
+                        }
+                    }
                 }
                 _ = heartbeat_interval.tick() => {
                     let heartbeat = Message::heartbeat(sequence);
-                    sequence += 1;
+                    sequence = sequence.wrapping_add(1);
 
-                    if let Err(e) = framed.send(heartbeat).await {
+                    let payload = match encode_message(heartbeat) {
+                        Ok(payload) => payload,
+                        Err(e) => {
+                            self.emit_error(format!("Heartbeat encode error: {}", e));
+                            break;
+                        }
+                    };
+
+                    if let Err(e) = websocket.send(WsMessage::Binary(payload.into())).await {
                         self.emit_error(format!("Heartbeat error: {}", e));
                         break;
                     }
                 }
             }
         }
+
+        let _ = websocket.close(None).await;
 
         let _ = self.app_handle.emit(
             "connection-closed",
@@ -324,5 +431,177 @@ impl SocketClient {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(total_size: u32, header_size: u16, payload: &[u8]) -> BytesMut {
+        let mut buf = BytesMut::new();
+        buf.put_u32(total_size);
+        buf.put_u16(header_size);
+        buf.put_u16(1); // protocol_version
+        buf.put_u32(Opcode::NORMAL);
+        buf.put_u32(0); // sequence
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Option<Message>, std::io::Error> {
+        ProtocolCodec.decode(buf)
+    }
+
+    #[test]
+    fn decodes_well_formed_frame() {
+        let payload = vec![0xABu8; 700];
+        let mut buf = frame(716, 16, &payload);
+
+        let msg = decode(&mut buf).expect("valid frame must decode").unwrap();
+        assert_eq!(msg.payload, payload);
+        assert!(buf.is_empty(), "frame must be fully consumed");
+    }
+
+    #[test]
+    fn waits_for_incomplete_frame() {
+        let mut buf = frame(716, 16, &[0u8; 100]);
+        assert!(decode(&mut buf)
+            .expect("incomplete frame is not an error")
+            .is_none());
+    }
+
+    /// A frame whose declared `header_size` exceeds its `total_size` made
+    /// `total_size - header_size` underflow and panicked, which aborted the
+    /// entire process because release builds set `panic = "abort"`.
+    #[test]
+    fn rejects_header_size_larger_than_total_size() {
+        let mut buf = frame(100, 200, &[0u8; 700]);
+        let err = decode(&mut buf).expect_err("must be rejected, not panic");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_header_size_below_minimum() {
+        let mut buf = frame(32, 15, &[0u8; 16]);
+        let err = decode(&mut buf).expect_err("must be rejected, not panic");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_oversized_frame() {
+        let mut buf = frame(10_000_001, 16, &[]);
+        let err = decode(&mut buf).expect_err("must be rejected, not panic");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// A small compressed payload must not be able to expand past the
+    /// decompression limit: the stream compresses ~1000x, so a tiny frame
+    /// could otherwise force a huge allocation.
+    #[test]
+    fn zlib_decompression_is_bounded() {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&vec![0u8; 32 * 1024 * 1024]).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        assert!(
+            compressed.len() < 64 * 1024,
+            "expected a tiny compressed payload, got {} bytes",
+            compressed.len()
+        );
+        assert!(crate::utils::zlib_decode(compressed).is_err());
+    }
+
+    #[test]
+    fn zlib_decompresses_normal_payload() {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(b"hello danmaku").unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        assert_eq!(
+            crate::utils::zlib_decode(compressed).unwrap(),
+            b"hello danmaku"
+        );
+    }
+
+    #[test]
+    fn brotli_decompression_is_bounded() {
+        use std::io::Write;
+
+        let mut buf = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut buf, 4096, 5, 22);
+            encoder.write_all(&vec![0u8; 32 * 1024 * 1024]).unwrap();
+        }
+
+        assert!(
+            buf.len() < 1024,
+            "expected a tiny brotli payload, got {} bytes",
+            buf.len()
+        );
+        assert!(crate::utils::brotli_decode(buf).is_err());
+    }
+
+    #[test]
+    fn brotli_decompresses_normal_payload() {
+        use std::io::Write;
+
+        let mut buf = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut buf, 4096, 5, 22);
+            encoder.write_all(b"hello danmaku").unwrap();
+        }
+
+        assert_eq!(crate::utils::brotli_decode(buf).unwrap(), b"hello danmaku");
+    }
+
+    /// The old loop advanced `offset` by `total_size`, so a sub-packet that
+    /// declared zero bytes looped forever and emitted empty messages.
+    #[test]
+    fn rejects_zero_sized_sub_packet() {
+        let mut buffer = BytesMut::new();
+        buffer.put_u32(0);
+        buffer.put_u16(0);
+        buffer.put_u16(1);
+        buffer.put_u32(Opcode::NORMAL);
+        buffer.put_u32(0);
+
+        assert!(split_sub_packets(&buffer).is_err());
+    }
+
+    #[test]
+    fn splits_valid_sub_packets() {
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(&frame(21, 16, b"hello"));
+        buffer.extend_from_slice(&frame(19, 16, b"bye"));
+
+        let packets = split_sub_packets(&buffer).unwrap();
+        assert_eq!(packets, vec![&b"hello"[..], &b"bye"[..]]);
+    }
+
+    #[test]
+    fn rejects_truncated_sub_packet() {
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(&frame(100, 16, b"short"));
+
+        assert!(split_sub_packets(&buffer).is_err());
+    }
+
+    #[test]
+    fn rejects_too_many_sub_packets() {
+        let mut buffer = BytesMut::new();
+        for _ in 0..=MAX_SUB_PACKETS_PER_FRAME {
+            buffer.extend_from_slice(&frame(16, 16, &[]));
+        }
+
+        assert!(split_sub_packets(&buffer).is_err());
     }
 }

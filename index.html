@@ -1,16 +1,20 @@
 <!doctype html>
 <html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>哔哩哔哩直播姬（仮）</title>
+    <meta name="referrer" content="no-referrer" />
+    <script>
+      try {
+        const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.classList.toggle("dark", dark);
+      } catch {}
+    </script>
+  </head>
 
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>哔哩哔哩直播姬（仮）</title>
-  <meta name="referrer" content="no-referrer" />
-</head>
-
-<body>
-  <div id="root"></div>
-  <script type="module" src="/src/main.tsx"></script>
-</body>
-
+  <body>
+    <div id="app" class="isolate"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
 </html>
