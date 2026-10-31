@@ -4,7 +4,7 @@
     "name": "Rsplwe",
     "email": "rsplwe@anon.tokyo"
   },
-  "version": "0.5.4",
+  "version": "0.6.0",
   "type": "module",
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
